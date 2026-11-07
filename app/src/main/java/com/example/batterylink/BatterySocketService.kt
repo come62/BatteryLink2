@@ -136,4 +136,106 @@ class BatterySocketService : Service() {
                 Thread.sleep(backoff)
             } catch (e: InterruptedException) {
             }
-       
+            backoff = minOf(backoff * 2, 30000L)
+        }
+    }
+        private fun handle(ws: WebSocket, text: String) {
+        val msg = try {
+            JSONObject(text)
+        } catch (e: Exception) {
+            JSONObject().put("action", text.trim())
+        }
+        val id = msg.optString("id", "")
+        var action = msg.optString("action", "")
+        if (action.isEmpty()) action = msg.optString("type", msg.optString("cmd", ""))
+
+        val reply = JSONObject().put("id", id).put("action", action)
+        when (action) {
+            "get_battery" -> readBattery(reply)
+            "open_app" -> openApp(msg.optString("name", ""), msg.optString("pkg", ""), reply)
+            "ping" -> reply.put("ok", true)
+            else -> reply.put("ok", false).put("error", "未知指令: $action")
+        }
+        ws.send(reply.toString())
+    }
+
+    private fun readBattery(reply: JSONObject) {
+        val i = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        if (i == null) {
+            reply.put("ok", false).put("error", "读不到电量")
+            return
+        }
+        val level = i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = i.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
+        val status = i.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        val plugged = i.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
+        val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+            status == BatteryManager.BATTERY_STATUS_FULL
+        reply.put("ok", true)
+            .put("level", if (scale > 0) level * 100 / scale else level)
+            .put("charging", charging)
+            .put("plugged", plugged)
+            .put("ts", System.currentTimeMillis())
+    }
+
+    @Suppress("DEPRECATION")
+    private fun openApp(name: String, pkg: String, reply: JSONObject) {
+        val pm = packageManager
+        var target = pkg.trim()
+        var label = name.trim()
+
+        if (target.isEmpty()) {
+            if (label.isEmpty()) {
+                reply.put("ok", false).put("error", "缺少 name 或 pkg")
+                return
+            }
+            val main = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            val apps = pm.queryIntentActivities(main, 0)
+            val hit = apps.firstOrNull { it.loadLabel(pm).toString() == label }
+                ?: apps.firstOrNull { it.loadLabel(pm).toString().contains(label, ignoreCase = true) }
+            if (hit == null) {
+                reply.put("ok", false).put("error", "没找到应用: $label")
+                return
+            }
+            target = hit.activityInfo.packageName
+            label = hit.loadLabel(pm).toString()
+        }
+
+        val launch = pm.getLaunchIntentForPackage(target)
+        if (launch == null) {
+            reply.put("ok", false).put("error", "无法启动: $target")
+            return
+        }
+
+        try {
+            val power = getSystemService(PowerManager::class.java)
+            val wl = power.newWakeLock(
+                PowerManager.FULL_WAKE_LOCK or
+                    PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                    PowerManager.ON_AFTER_RELEASE,
+                "BatteryLink:open"
+            )
+            wl.acquire(8000)
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+            startActivity(launch)
+            reply.put("ok", true).put("package", target).put("label", label)
+        } catch (e: Exception) {
+            reply.put("ok", false).put("error", "启动失败: " + (e.message ?: ""))
+        }
+    }
+
+    override fun onDestroy() {
+        running = false
+        socket?.cancel()
+        worker?.interrupt()
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("status", "已停止").apply()
+        super.onDestroy()
+    }
+
+    companion object {
+        const val PREFS = "battery_link"
+        private const val CHANNEL = "battery_link"
+        private const val NOTIF_ID = 1
+    }
+}
+    
