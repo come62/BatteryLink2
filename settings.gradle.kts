@@ -1,16 +1,16 @@
-插件管理{
-仓库{
+pluginManagement {
+    repositories {
         google()
         mavenCentral()
         gradlePluginPortal()
     }
 }
-依赖管理{
+dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-仓库{
+    repositories {
         google()
         mavenCentral()
     }
 }
-rootProject.name ="BatteryLink"
-包含(":app")
+rootProject.name = "BatteryLink"
+include(":app")
